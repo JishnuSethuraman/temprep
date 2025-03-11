@@ -38,6 +38,7 @@ def evaluate_model(model, dataloader, device):
     return correct / total if total > 0 else 0
 
 def load_sst2_dataset(tokenizer, split="train", limit=None):
+    # Load the SST-2 dataset from GLUE using HuggingFace datasets library.
     dataset = load_dataset("glue", "sst2", split=split)
     if limit is not None:
         dataset = dataset.select(range(limit))
@@ -102,7 +103,7 @@ def train_quantized_distillation(teacher, student, train_loader, device, num_epo
             epoch_loss += loss.item()
         print(f"Epoch {epoch+1}/{num_epochs}: Loss = {epoch_loss/len(train_loader):.4f}")
     
-    # Move student model to CPU and apply dynamic quantization.
+    # After training, move student model to CPU before applying quantization.
     student_cpu = student.cpu()
     student_quantized = quant.quantize_dynamic(student_cpu, {nn.Linear}, dtype=torch.qint8)
     return student_quantized
@@ -110,12 +111,12 @@ def train_quantized_distillation(teacher, student, train_loader, device, num_epo
 # ----- Main Pipeline -----
 def run_distillation_pipeline(model_pairs, device):
     results = {}
-    # Load full training split for distillation training.
+    # Load entire training split for distillation training
     train_texts, train_labels = load_sst2_dataset(tokenizer=model_pairs[0]["tokenizer"], split="train")
     train_dataset = HFDataset(model_pairs[0]["tokenizer"], train_texts, train_labels, max_length=128)
     train_dataloader = DataLoader(train_dataset, batch_size=16, shuffle=True)
     
-    # Load validation split for evaluation.
+    # Load validation split for evaluation
     val_texts, val_labels = load_sst2_dataset(tokenizer=model_pairs[0]["tokenizer"], split="validation")
     val_dataset = HFDataset(model_pairs[0]["tokenizer"], val_texts, val_labels, max_length=128)
     val_dataloader = DataLoader(val_dataset, batch_size=16, shuffle=False)
@@ -132,11 +133,7 @@ def run_distillation_pipeline(model_pairs, device):
         teacher.to(device)
         student.to(device)
         
-        # If multiple GPUs available, wrap models with DataParallel.
-        if torch.cuda.device_count() > 1:
-            teacher = torch.nn.DataParallel(teacher)
-            student = torch.nn.DataParallel(student)
-        
+        # Evaluate on validation split.
         teacher_acc = evaluate_model(teacher, val_dataloader, device)
         student_acc = evaluate_model(student, val_dataloader, device)
         teacher_params = count_params(teacher)
@@ -147,9 +144,11 @@ def run_distillation_pipeline(model_pairs, device):
         print(f"Teacher ({pair['teacher_id']}): {teacher_params/1e6:.2f}M params, ~{teacher_size:.2f} MB, Val Acc: {teacher_acc*100:.2f}%")
         print(f"Student ({pair['student_id']}): {student_params/1e6:.2f}M params, ~{student_size:.2f} MB, Val Acc: {student_acc*100:.2f}%")
         
+        # Distillation training on training split.
         print("Starting distillation training on full training set...")
         distilled_student = train_quantized_distillation(teacher, student, train_dataloader, device, num_epochs=3)
         
+        # Evaluate distilled student on validation set.
         distilled_dataloader = DataLoader(val_dataset, batch_size=16, shuffle=False)
         distilled_acc = evaluate_model(distilled_student, distilled_dataloader, device=torch.device("cpu"))
         distilled_params = count_params(distilled_student)
@@ -203,8 +202,10 @@ model_pairs = [
     }
 ]
 
+# Run the distillation pipeline for the defined model pairs.
 results = run_distillation_pipeline(model_pairs, device)
 
+# Print summary results.
 print("\n=== Summary of Results ===")
 for pair_name, info in results.items():
     print(f"{pair_name}:")
